@@ -1,0 +1,11 @@
+# Actual environment config (contains secrets)
+.env
+
+# WireGuard data directory (contains private keys and client configs)
+wg-data/
+
+# AmneziaWG data directory (server private key, peer list)
+awg-data/
+
+# Real XRAY config (contains UUIDs and Reality private key)
+xray/config.json
