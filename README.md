@@ -12,8 +12,9 @@ wg-easy provides a web UI for client management. XRAY and AmneziaWG are configur
 
 ## Prerequisites
 
-- Docker and Docker Compose installed on the host
 - A server with a public IP address (or LAN IP for local testing)
+- Root or `sudo` access
+- A KVM-based VPS (OpenVZ/LXC containers won't work — they lack `/dev/net/tun` and the kernel WireGuard module)
 - Ports open in the firewall:
 
 | Port  | Protocol | Service     | Audience                |
@@ -22,6 +23,88 @@ wg-easy provides a web UI for client management. XRAY and AmneziaWG are configur
 | 51821 | TCP      | wg-easy UI  | Trusted IPs only / SSH tunnel |
 | 443   | TCP      | XRAY        | Public                  |
 | 51822 | UDP      | AmneziaWG   | Public                  |
+
+### Install required software on the VPS
+
+The host needs Docker Engine, the Compose v2 plugin, the WireGuard kernel module (for wg-easy), and IPv4 forwarding enabled. Steps below assume **Ubuntu 22.04 / 24.04 or Debian 12** — the most common VPS images.
+
+**1. Update the system and install base tools:**
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y ca-certificates curl gnupg git openssl
+```
+
+**2. Install Docker Engine + Compose plugin** (from Docker's official repo — distro packages are usually too old):
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+For Debian, replace `ubuntu` with `debian` in both URLs above.
+
+Verify:
+
+```bash
+docker --version
+docker compose version
+```
+
+**3. Run Docker without `sudo`** (optional but recommended):
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker     # or log out and back in
+```
+
+**4. Install the WireGuard kernel module** (needed by wg-easy; AmneziaWG runs in userspace and does not require it):
+
+```bash
+sudo apt install -y wireguard-tools
+sudo modprobe wireguard
+lsmod | grep wireguard     # should print a line
+```
+
+**5. Enable IPv4 forwarding persistently:**
+
+```bash
+echo 'net.ipv4.ip_forward=1' | sudo tee /etc/sysctl.d/99-vpn-forward.conf
+sudo sysctl --system
+```
+
+**6. Verify the kernel exposes `/dev/net/tun`** (required by AmneziaWG):
+
+```bash
+ls -l /dev/net/tun
+# crw-rw-rw- 1 root root 10, 200 ...
+```
+
+If it's missing, your VPS provider is using OpenVZ/LXC and this stack will not work — pick a KVM plan.
+
+**7. Sanity-check CPU features** (AES-NI dramatically speeds up VPN crypto):
+
+```bash
+grep -E -o 'aes|avx' /proc/cpuinfo | sort -u
+```
+
+**8. Clone the repo:**
+
+```bash
+git clone <this-repo-url> h-gate
+cd h-gate
+```
+
+You're ready for the Quick Start below.
 
 ## Quick Start
 
@@ -192,10 +275,92 @@ docker compose pull && docker compose up -d
 
 # Rebuild AWG after upstream changes
 docker compose build --no-cache awg && docker compose up -d awg
-
-# Backup (private keys + client lists)
-tar czf vpn-backup-$(date +%F).tar.gz wg-data/ awg-data/ xray/config.json .env
 ```
+
+See **Backup & Restore** below for snapshot and recovery.
+
+## Backup & Restore
+
+Everything in the repo can be regenerated from its templates except the per-deployment state below. These are the paths that matter:
+
+| Path | Contains |
+|---|---|
+| `.env` | host, wg-easy password hash, XRAY Reality params |
+| `wg-data/` | wg-easy server keys + all client configs |
+| `awg-data/` | AmneziaWG server keypair + peer list |
+| `xray/config.json` | XRAY runtime config — Reality private key + all client UUIDs |
+| `xray/urls/` | per-client vless:// URLs (optional; regenerable from `xray/config.json`) |
+
+All five are listed in `.gitignore`, so they live only on the host.
+
+### Backup
+
+```bash
+# Snapshot to a tarball, preserving mode bits (private keys stay 0600).
+tar czf vpn-backup-$(date +%F).tar.gz \
+    .env wg-data/ awg-data/ xray/config.json xray/urls/
+
+# Move it off the host. Don't store it on the same machine you're backing up.
+scp vpn-backup-*.tar.gz user@elsewhere:~/backups/
+```
+
+If the backup will sit anywhere other than offline media (object storage, shared file server, second VPS), encrypt it first. Lowest-dependency option:
+
+```bash
+gpg --symmetric --cipher-algo AES256 vpn-backup-$(date +%F).tar.gz
+# Produces .tar.gz.gpg. Verify it decrypts, then delete the plaintext.
+gpg --decrypt vpn-backup-$(date +%F).tar.gz.gpg | tar tz | head
+rm vpn-backup-$(date +%F).tar.gz
+```
+
+### Restore (fresh VPS)
+
+1. Run the **Prerequisites** install steps at the top of this README — Docker, Compose, `wireguard-tools`, sysctl forwarding, `/dev/net/tun` check.
+2. Clone the repo:
+   ```bash
+   git clone <this-repo-url> h-gate
+   cd h-gate
+   ```
+3. Build the AWG image (the backup carries state, not images):
+   ```bash
+   docker compose build awg
+   ```
+4. Extract the backup over the repo root:
+   ```bash
+   tar xzf ~/vpn-backup-2026-05-14.tar.gz
+   # or, if encrypted:
+   # gpg --decrypt ~/vpn-backup-2026-05-14.tar.gz.gpg | tar xz
+   ```
+   `tar` restores ownership and `0600` on private keys. Verify a sample:
+   ```bash
+   ls -l wg-data/wg0.json xray/config.json
+   ```
+5. If the host's public IP or domain changed, update `WG_HOST` in `.env`. Existing distributed client configs have the old endpoint baked in — see below.
+6. Bring the stack up:
+   ```bash
+   docker compose up -d
+   docker compose ps
+   ```
+
+### Restoring to a new IP / hostname
+
+The server state survives; the **client-side configs** you previously handed out do not, because they each contain the old endpoint:
+
+- **wg-easy** clients have `Endpoint = <old-ip>:51820` in their `.conf`. Either re-issue from the wg-easy UI, or have each client edit the line locally.
+- **AmneziaWG** clients have `Endpoint = <old-ip>:51822` in their `.conf`. Same fix.
+- **XRAY** clients have the host in the vless:// URL (`@<host>:443`). Re-issue URLs:
+  ```bash
+  # Regenerate one URL file for an existing user by deleting the line
+  # in xray/config.json's clients[] and running xray-add-user.sh again
+  # — UUIDs are reusable but adding the same name twice is refused.
+  ```
+  The cleanest workaround: keep `WG_HOST` set to a domain (not a literal IP) that you can repoint via DNS. Then a host move requires only a DNS change; no client config touches.
+
+### What is NOT in the backup, by design
+
+- **Reality public key.** Not stored — derived on demand from `realitySettings.privateKey` in `xray/config.json` by `scripts/xray-add-user.sh` via `xray x25519 -i`. As long as `xray/config.json` is in the backup, the public key is recoverable.
+- **Docker images.** Re-pulled / re-built from the repo. The AWG image must be `docker compose build awg`'d on the new host (no published image exists).
+- **Host hardening state.** See `HARDENING.md` — it's the same checklist for every fresh host, run once.
 
 ## Firewall Rules
 

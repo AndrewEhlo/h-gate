@@ -9,3 +9,6 @@ awg-data/
 
 # Real XRAY config (contains UUIDs and Reality private key)
 xray/config.json
+
+# Per-client vless:// URLs written by scripts/xray-add-user.sh (embed UUIDs)
+xray/urls/
