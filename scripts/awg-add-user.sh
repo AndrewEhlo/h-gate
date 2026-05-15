@@ -200,8 +200,10 @@ payload = {
     "dns2":             "1.0.0.1",
     "defaultContainer": "amnezia-awg",
     "containers": [{
-        "container": "amnezia-awg",
-        "awg":       awg,
+        "container":   "amnezia-awg",
+        # Inner key matches the container name. Using "awg" here caused
+        # AmneziaVPN to import as "AmneziaWG Legacy" (no obfuscation).
+        "amnezia-awg": awg,
     }],
 }
 
