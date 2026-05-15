@@ -168,13 +168,30 @@ EOF
 )"
 
 # Encode as a vpn:// URL: JSON payload → qCompress (Qt-style: 4-byte BE
-# uncompressed length + zlib stream) → base64url. Best-effort schema; if
-# AmneziaVPN's importer rejects it, iterate this block.
+# uncompressed length + zlib stream) → base64url. AmneziaVPN's schema for
+# AWG isn't publicly specced — obfuscation params are lifted out of the
+# .conf and set as explicit fields on the awg object so the app classifies
+# the container as proper AmneziaWG (not "AmneziaWG Legacy" = vanilla WG).
 URL="$(printf '%s' "$CONF_TEXT" | python3 - "$NAME" "$WG_HOST" "$LISTEN_PORT" <<'PY_EOF'
-import sys, json, zlib, base64, struct
+import sys, json, zlib, base64, struct, re
 
 name, host, port = sys.argv[1:4]
 conf = sys.stdin.read()
+
+def grab(key):
+    m = re.search(rf'^{key}\s*=\s*(\S+)', conf, re.MULTILINE)
+    return m.group(1) if m else None
+
+awg = {
+    "last_config":           conf,
+    "transport_proto":       "udp",
+    "port":                  str(port),
+    "isObfuscationEnabled":  True,
+}
+for k in ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"):
+    v = grab(k)
+    if v is not None:
+        awg[k] = v
 
 payload = {
     "description":      name,
@@ -184,11 +201,7 @@ payload = {
     "defaultContainer": "amnezia-awg",
     "containers": [{
         "container": "amnezia-awg",
-        "awg": {
-            "last_config":     conf,
-            "transport_proto": "udp",
-            "port":            str(port),
-        },
+        "awg":       awg,
     }],
 }
 
