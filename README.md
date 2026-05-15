@@ -130,19 +130,30 @@ docker run -it ghcr.io/wg-easy/wg-easy wgpw 'YOUR_PASSWORD'
 
 ### 2. Set up XRAY
 
-Generate the three required values:
+Generate the Reality private key and a short ID:
 
 ```bash
-docker run --rm teddysun/xray xray uuid             # one UUID per client
-docker run --rm teddysun/xray xray x25519           # Reality keypair (keep both)
-openssl rand -hex 8                                  # short ID
+docker run --rm teddysun/xray xray x25519     # outputs PrivateKey + Password
+openssl rand -hex 8                           # short ID
 ```
+
+Fill these into `.env` along with the impersonation target SNI (must support TLS 1.3 + X25519 — `mail.kz`, `www.microsoft.com`, `www.cloudflare.com` are battle-tested):
+
+```
+XRAY_REALITY_PRIVATE_KEY=<PrivateKey line from xray x25519>
+XRAY_SNI=mail.kz
+XRAY_SHORT_ID=<output of openssl rand>
+```
+
+Then generate `xray/config.json` from `.env`:
 
 ```bash
-cp xray/config.example.json xray/config.json
+bash scripts/xray-sync-config.sh
 ```
 
-Edit `xray/config.json` and replace the three `REPLACE_WITH_*` placeholders. Save the Reality **public** key — clients need it.
+The script copies `xray/config.example.json` and applies the values from `.env`, leaving `clients[]` empty. Run it again any time you rotate the Reality key, change the SNI, or change the short ID — existing clients are preserved across runs. Pass `--restart` to also reload the xray container.
+
+The matching public key (the one clients need as `pbk`) is **not** stored separately — `scripts/xray-add-user.sh` derives it on demand via `xray x25519 -i` when it builds each client's URL.
 
 ### 3. Set up AmneziaWG
 
@@ -155,7 +166,7 @@ docker compose build awg
 Generate the server keypair:
 
 ```bash
-docker run --rm --entrypoint sh awg-awg -c 'awg genkey | tee /dev/stderr | awg pubkey'
+docker run --rm --entrypoint sh h-gate-awg:latest -c 'awg genkey | tee /dev/stderr | awg pubkey'
 # First line  = server private key
 # Second line = server public key (clients need this)
 ```
@@ -184,16 +195,15 @@ Use the web UI. **New Client** → name it → download `.conf` or scan QR. Rout
 
 ### XRAY (VLESS + Reality)
 
-1. Generate a UUID per device: `docker run --rm teddysun/xray xray uuid`
-2. Add an entry to `xray/config.json` under `inbounds[0].settings.clients`:
-   ```json
-   { "id": "<NEW_UUID>", "flow": "xtls-rprx-vision" }
-   ```
-3. Restart: `docker compose restart xray`
-4. Give the client this URI (one per device, or QR-encode it):
-   ```
-   vless://<UUID>@<WG_HOST>:443?security=reality&encryption=none&pbk=<REALITY_PUBLIC_KEY>&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=mail.kz&sid=<SHORT_ID>#<name>
-   ```
+```bash
+sudo bash scripts/xray-add-user.sh <client-name>
+```
+
+The script generates a fresh UUID, appends a client entry to `xray/config.json`, restarts the xray container, derives the Reality public key from the private key in `xray/config.json`, and writes the resulting `vless://...` URL to `xray/urls/<client-name>.txt` (mode 600). The URL is also printed to stdout — copy it into the client app, or render an in-terminal QR with:
+
+```bash
+sudo qrencode -t ansiutf8 < xray/urls/<client-name>.txt
+```
 
 Client apps:
 
@@ -205,39 +215,21 @@ Client apps:
 
 ### AmneziaWG
 
-1. Generate a client keypair on the *client device* (or with `docker run --rm --entrypoint sh awg-awg -c 'awg genkey | tee /dev/stderr | awg pubkey'`).
-2. Append a `[Peer]` block to `awg-data/awg0.conf`:
-   ```ini
-   [Peer]
-   PublicKey = <CLIENT_PUBLIC_KEY>
-   AllowedIPs = 10.9.0.2/32
-   ```
-   Increment the IP for each new client (`10.9.0.2`, `10.9.0.3`, …).
-3. Restart: `docker compose restart awg`
-4. Build the client `.conf` (paste into AmneziaVPN app). **`Jc`/`Jmin`/`Jmax`/`S1`/`S2`/`H1`-`H4` must match the server exactly.**
-   ```ini
-   [Interface]
-   PrivateKey = <CLIENT_PRIVATE_KEY>
-   Address = 10.9.0.2/32
-   DNS = 1.1.1.1
-   Jc = 4
-   Jmin = 40
-   Jmax = 70
-   S1 = 0
-   S2 = 0
-   H1 = 982742843
-   H2 = 1325344849
-   H3 = 1456789012
-   H4 = 1567890123
+```bash
+sudo bash scripts/awg-add-user.sh <client-name>
+```
 
-   [Peer]
-   PublicKey = <SERVER_PUBLIC_KEY>
-   Endpoint = <WG_HOST>:51822
-   AllowedIPs = 0.0.0.0/0, ::/0
-   PersistentKeepalive = 25
-   ```
+The script generates a fresh keypair via the running `awg` container, picks the next free `10.9.0.X` address (scans existing `[Peer] AllowedIPs` in `awg-data/awg0.conf`), appends a new `[Peer]` block, restarts the container, and emits a single-line `vpn://...` URL on stdout. The URL is also written to `awg-data/urls/<client-name>.txt` (mode 600).
 
-Client app (all platforms): **AmneziaVPN** — supports importing the `.conf` directly.
+`Jc`/`Jmin`/`Jmax`/`S1`/`S2`/`H1`-`H4` are read from the server config and embedded in the client URL, so they always match — no manual sync needed.
+
+Client app (all platforms): **AmneziaVPN** — paste the `vpn://` URL into "Add server" → "Paste from clipboard". Or pipe the URL file through `qrencode` and scan with the mobile app:
+
+```bash
+sudo qrencode -t ansiutf8 < awg-data/urls/<client-name>.txt
+```
+
+> **Note:** the `vpn://` format is the AmneziaVPN apps' native share format (Qt `qCompress` + base64url over a JSON payload nesting the full `.conf` as `last_config`). If a future AmneziaVPN release changes the schema and rejects the URL, fall back to manual peer registration (key generation + `[Peer]` block in `awg-data/awg0.conf` + client `.conf` mirroring the server's obfuscation params).
 
 ## Full Tunnel vs Split Tunnel (wg-easy)
 
