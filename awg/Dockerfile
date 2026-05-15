@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.24-alpine AS build
 RUN apk add --no-cache git make gcc musl-dev bash
 
 RUN git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git /src/awg-go && \
