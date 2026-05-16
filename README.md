@@ -56,16 +56,18 @@ For Debian, replace `ubuntu` with `debian` in both URLs above.
 Verify:
 
 ```bash
-docker --version
-docker compose version
+docker --version              # no sudo: client-only version check
+sudo docker compose version
 ```
 
-**3. Run Docker without `sudo`** (optional but recommended):
+**3. Docker access** — the daemon socket is root-owned by default, so every `docker` command needs `sudo`. The rest of this README assumes that. You can opt out by adding your user to the `docker` group:
 
 ```bash
 sudo usermod -aG docker $USER
 newgrp docker     # or log out and back in
 ```
+
+Be aware: membership in the `docker` group is **equivalent to passwordless root** via `sudo docker run --privileged -v /:/host`. The `sudo docker` path keeps `sudo` as the single audit gate to root at the cost of typing it each time. For a single-admin staging box either is fine; multi-user or production setups should keep `sudo`. See `HARDENING.md` for context.
 
 **4. Install the WireGuard kernel module** (needed by wg-easy; AmneziaWG runs in userspace and does not require it):
 
@@ -123,7 +125,7 @@ WG_HOST=203.0.113.10
 Generate a bcrypt hash for the wg-easy web UI and put it in `.env` as `PASSWORD_HASH`. **Every `$` must be doubled to `$$`** — otherwise Compose interpolates the hash and login breaks.
 
 ```bash
-docker run -it ghcr.io/wg-easy/wg-easy wgpw 'YOUR_PASSWORD'
+sudo docker run -it ghcr.io/wg-easy/wg-easy wgpw 'YOUR_PASSWORD'
 # Output: $2a$12$abc...xyz
 # In .env:  PASSWORD_HASH=$$2a$$12$$abc...xyz
 ```
@@ -133,7 +135,7 @@ docker run -it ghcr.io/wg-easy/wg-easy wgpw 'YOUR_PASSWORD'
 Generate the Reality private key and a short ID:
 
 ```bash
-docker run --rm teddysun/xray xray x25519     # outputs PrivateKey + Password
+sudo docker run --rm teddysun/xray xray x25519     # outputs PrivateKey + Password
 openssl rand -hex 8                           # short ID
 ```
 
@@ -148,7 +150,7 @@ XRAY_SHORT_ID=<output of openssl rand>
 Then generate `xray/config.json` from `.env`:
 
 ```bash
-bash scripts/xray-sync-config.sh
+sudo bash scripts/xray-sync-config.sh
 ```
 
 The script copies `xray/config.example.json` and applies the values from `.env`, leaving `clients[]` empty. Run it again any time you rotate the Reality key, change the SNI, or change the short ID — existing clients are preserved across runs. Pass `--restart` to also reload the xray container.
@@ -160,13 +162,13 @@ The matching public key (the one clients need as `pbk`) is **not** stored separa
 Build the AWG image (compiles `amneziawg-go` + `amneziawg-tools` from source):
 
 ```bash
-docker compose build awg
+sudo docker compose build awg
 ```
 
 Generate the server keypair:
 
 ```bash
-docker run --rm --entrypoint sh h-gate-awg:latest -c 'awg genkey | tee /dev/stderr | awg pubkey'
+sudo docker run --rm --entrypoint sh h-gate-awg:latest -c 'awg genkey | tee /dev/stderr | awg pubkey'
 # First line  = server private key
 # Second line = server public key (clients need this)
 ```
@@ -181,8 +183,8 @@ Edit `awg-data/awg0.conf` and paste the **private** key into `PrivateKey =`. The
 ### 4. Start the stack
 
 ```bash
-docker compose up -d
-docker compose ps     # all three containers should be "running"
+sudo docker compose up -d
+sudo docker compose ps     # all three containers should be "running"
 ```
 
 Open the wg-easy UI at `http://<WG_HOST>:51821` and log in.
@@ -196,15 +198,15 @@ Use the web UI. **New Client** → name it → download `.conf` or scan QR. Rout
 ### XRAY (VLESS + Reality)
 
 ```bash
-bash scripts/xray-add-user.sh    <client-name>     # add
-bash scripts/xray-list-users.sh                    # list
-bash scripts/xray-remove-user.sh <client-name>     # remove
+sudo bash scripts/xray-add-user.sh    <client-name>     # add
+sudo bash scripts/xray-list-users.sh                    # list
+sudo bash scripts/xray-remove-user.sh <client-name>     # remove
 ```
 
 **Add** generates a fresh UUID, appends a client entry to `xray/config.json`, restarts the xray container, derives the Reality public key on the fly from the private key, and writes the resulting `vless://...` URL to `xray/urls/<client-name>.txt` (mode 600). The URL is also printed to stdout — copy into the client app, or render an in-terminal QR:
 
 ```bash
-qrencode -t ansiutf8 < xray/urls/<client-name>.txt
+sudo cat xray/urls/<client-name>.txt | qrencode -t ansiutf8
 ```
 
 **List** prints a table of all configured clients (`NAME`, `UUID`, `URL FILE`) by reading `xray/config.json`. XRAY doesn't expose per-client live state unless its `statsService` is enabled, so there's no traffic counter here.
@@ -222,9 +224,9 @@ Client apps:
 ### AmneziaWG
 
 ```bash
-bash scripts/awg-add-user.sh    <client-name>     # add
-bash scripts/awg-list-users.sh                    # list (with live state)
-bash scripts/awg-remove-user.sh <client-name>     # remove
+sudo bash scripts/awg-add-user.sh    <client-name>     # add
+sudo bash scripts/awg-list-users.sh                    # list (with live state)
+sudo bash scripts/awg-remove-user.sh <client-name>     # remove
 ```
 
 **Add** generates a fresh keypair via the running `awg` container, picks the next free `10.9.0.X` address (scanning existing `[Peer] AllowedIPs`), appends a new `[Peer]` block, restarts the container, and emits a single-line `vpn://...` URL. Also written to `awg-data/urls/<client-name>.txt` (mode 600). `Jc`/`Jmin`/`Jmax`/`S1`-`S4`/`H1`-`H4` are read from the server config and embedded in the URL — server and client always agree.
@@ -236,7 +238,7 @@ bash scripts/awg-remove-user.sh <client-name>     # remove
 Client app (all platforms): **AmneziaVPN** — paste the `vpn://` URL into "Add server" → "Paste from clipboard", or scan a QR:
 
 ```bash
-qrencode -t ansiutf8 < awg-data/urls/<client-name>.txt
+sudo cat awg-data/urls/<client-name>.txt | qrencode -t ansiutf8
 ```
 
 > **Schema caveat for the `vpn://` URL**: AmneziaVPN's share format isn't publicly specced. The script generates URLs in the v2 schema (`container: "amnezia-awg2"`, `protocol_version: "2"`, `last_config` as a JSON-stringified object containing `client_priv_key`, `clientId`, `mtu`, etc.). If a future AmneziaVPN release changes the schema and rejects the URL, fall back to manual peer registration: copy the `[Peer]` block from `awg-data/awg0.conf` plus the obfuscation params from `[Interface]` into a hand-written client `.conf`.
@@ -255,7 +257,7 @@ Edit `WG_ALLOWED_IPS` in `.env`:
 After changing, recreate the container:
 
 ```bash
-docker compose down && docker compose up -d
+sudo docker compose down && sudo docker compose up -d
 ```
 
 This sets the default for *new* clients. Existing clients keep their downloaded config. For XRAY and AmneziaWG, `AllowedIPs` is set in the client config and changed there directly.
@@ -267,7 +269,7 @@ This sets the default for *new* clients. Existing clients keep their downloaded 
 **wg-easy (WireGuard)** — peer state with last-handshake and per-peer transfer:
 
 ```bash
-docker exec wg-easy wg show
+sudo docker exec wg-easy wg show
 ```
 
 The web UI at `http://<WG_HOST>:51821` shows the same data graphically.
@@ -275,8 +277,8 @@ The web UI at `http://<WG_HOST>:51821` shows the same data graphically.
 **AmneziaWG** — the list script joins names from `awg-data/awg0.conf` with live state from `awg show`:
 
 ```bash
-bash scripts/awg-list-users.sh
-docker exec awg awg show           # raw output, if you need it
+sudo bash scripts/awg-list-users.sh
+sudo docker exec awg awg show           # raw output, if you need it
 ```
 
 A peer with `latest handshake: never` has been registered but hasn't dialed yet. Recent handshake + non-zero transfer = currently connected.
@@ -284,13 +286,13 @@ A peer with `latest handshake: never` has been registered but hasn't dialed yet.
 **XRAY** — configured clients (no per-client live counters without `statsService`):
 
 ```bash
-bash scripts/xray-list-users.sh
+sudo bash scripts/xray-list-users.sh
 ```
 
 For live connection events:
 
 ```bash
-docker compose logs --tail=100 xray
+sudo docker compose logs --tail=100 xray
 ```
 
 XRAY logs an `accepted` line per established session. With `loglevel: "warning"` (our default), routine connect lines aren't emitted; bump to `info` in `xray/config.json` temporarily if you need them.
@@ -309,7 +311,7 @@ Per-peer cumulative bytes are already in `wg show` / `awg show` output (`transfe
 Aggregate per-container:
 
 ```bash
-docker stats --no-stream
+sudo docker stats --no-stream
 ```
 
 Host interface counters (cumulative since boot — useful for "how much have we shifted overall"):
@@ -338,7 +340,7 @@ Shows `Currently failed`, `Total failed`, `Currently banned`, plus the banned IP
 **XRAY rejections** — clients with the wrong UUID, mis-typed SNI, etc.:
 
 ```bash
-docker compose logs --tail=300 xray | grep -iE 'rejected|invalid|denied|fail'
+sudo docker compose logs --tail=300 xray | grep -iE 'rejected|invalid|denied|fail'
 ```
 
 **AmneziaWG handshake misses** — the server *silently* drops on obfuscation/key mismatch, so failures don't show in logs. Two ways to spot:
@@ -374,9 +376,9 @@ sudo fail2ban-client banned
 ### Container & host health
 
 ```bash
-docker compose ps                       # all three should say "Up"
-docker compose logs --tail=30 <svc>     # recent log lines for one service
-docker stats --no-stream                # CPU / mem / network per container
+sudo docker compose ps                       # all three should say "Up"
+sudo docker compose logs --tail=30 <svc>     # recent log lines for one service
+sudo docker stats --no-stream                # CPU / mem / network per container
 ```
 
 Host basics:
@@ -392,20 +394,20 @@ sudo journalctl -p err --since "24 hours ago" | head -30   # recent errors
 
 ```bash
 systemctl is-active unattended-upgrades apt-daily.timer apt-daily-upgrade.timer
-tail -20 /var/log/unattended-upgrades/unattended-upgrades.log
+sudo tail -20 /var/log/unattended-upgrades/unattended-upgrades.log
 ```
 
 ## Management
 
 ```bash
 # Stop everything
-docker compose down
+sudo docker compose down
 
 # Update images (wg-easy, xray)
-docker compose pull && docker compose up -d
+sudo docker compose pull && sudo docker compose up -d
 
 # Rebuild AWG after upstream changes
-docker compose build --no-cache awg && docker compose up -d awg
+sudo docker compose build --no-cache awg && sudo docker compose up -d awg
 ```
 
 See **Backup & Restore** below for snapshot and recovery, and **Monitoring & diagnostics** above for day-to-day visibility.
@@ -454,7 +456,7 @@ rm vpn-backup-$(date +%F).tar.gz
    ```
 3. Build the AWG image (the backup carries state, not images):
    ```bash
-   docker compose build awg
+   sudo docker compose build awg
    ```
 4. Extract the backup over the repo root:
    ```bash
@@ -469,8 +471,8 @@ rm vpn-backup-$(date +%F).tar.gz
 5. If the host's public IP or domain changed, update `WG_HOST` in `.env`. Existing distributed client configs have the old endpoint baked in — see below.
 6. Bring the stack up:
    ```bash
-   docker compose up -d
-   docker compose ps
+   sudo docker compose up -d
+   sudo docker compose ps
    ```
 
 ### Restoring to a new IP / hostname
@@ -490,7 +492,7 @@ The server state survives; the **client-side configs** you previously handed out
 ### What is NOT in the backup, by design
 
 - **Reality public key.** Not stored — derived on demand from `realitySettings.privateKey` in `xray/config.json` by `scripts/xray-add-user.sh` via `xray x25519 -i`. As long as `xray/config.json` is in the backup, the public key is recoverable.
-- **Docker images.** Re-pulled / re-built from the repo. The AWG image must be `docker compose build awg`'d on the new host (no published image exists).
+- **Docker images.** Re-pulled / re-built from the repo. The AWG image must be `sudo docker compose build awg`'d on the new host (no published image exists).
 - **Host hardening state.** See `HARDENING.md` — it's the same checklist for every fresh host, run once.
 
 ## Firewall Rules

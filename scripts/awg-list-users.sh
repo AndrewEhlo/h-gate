@@ -7,8 +7,7 @@
 #   awg-data/awg0.conf       — names and AllowedIPs of peers we registered
 #   docker exec awg awg show — live handshake + transfer counters
 #
-# Peers added manually (without a "# <name>" comment line) appear as
-# "(unnamed)" so they're still visible.
+# Peers added without a "# <name>" comment line appear as "(unnamed)".
 
 set -euo pipefail
 
@@ -18,40 +17,75 @@ SERVER_CONF="$REPO_ROOT/awg-data/awg0.conf"
 command -v docker >/dev/null || { echo "error: docker not installed" >&2; exit 1; }
 [ -f "$SERVER_CONF" ] || { echo "error: $SERVER_CONF missing" >&2; exit 1; }
 
-# Build pubkey -> name and pubkey -> IP maps from awg0.conf.
-# awg-data/awg0.conf may be mode 600; sudo handles that.
+# Build pubkey -> {name, ip} maps from awg0.conf.
+#
+# A "# <name>" comment only counts as a peer name when:
+#   - it matches /^# <single-token>$/ where <single-token> = [A-Za-z0-9._-]+
+#   - and nothing other than blank lines / further-replacing "# name" lines
+#     appears between it and the [Peer] header.
+#
+# PublicKey / AllowedIPs values are parsed whitespace-agnostically so the
+# script tolerates "Key = Value", "Key=Value", "Key =Value", and friends.
 declare -A NAME_BY_KEY IP_BY_KEY
 while IFS=$'\t' read -r name pub ip; do
     [ -n "$pub" ] || continue
+    [ -n "$ip"  ] || continue
     NAME_BY_KEY[$pub]="${name:-(unnamed)}"
     IP_BY_KEY[$pub]="$ip"
 done < <(awk '
-    /^# /                              { name = substr($0, 3); next }
-    /^\[Peer\]/                        { pub = ""; ip = ""; next }
-    /^PublicKey[[:space:]]*=/          { pub = $3; next }
-    /^AllowedIPs[[:space:]]*=/ {
-        ip = $3; sub(/\/32.*$/, "", ip); sub(/,.*$/, "", ip)
-        if (pub != "") {
-            printf "%s\t%s\t%s\n", name, pub, ip
-            name = ""
+    /^# [A-Za-z0-9._-]+[[:space:]]*$/ {
+        name = $2
+        sub(/[[:space:]]+$/, "", name)
+        next
+    }
+    /^#/ { name = ""; next }              # any other comment: clear pending name
+    /^[[:space:]]*$/ { next }             # blank line: keep state
+    /^\[Peer\]/ {                          # start of a peer block
+        pub = ""
+        next
+    }
+    /^\[/ {                                # any other section header
+        name = ""; pub = ""
+        next
+    }
+    /^PublicKey/ {
+        line = $0
+        sub(/^PublicKey[[:space:]]*=[[:space:]]*/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+        pub = line
+        next
+    }
+    /^AllowedIPs/ {
+        line = $0
+        sub(/^AllowedIPs[[:space:]]*=[[:space:]]*/, "", line)
+        sub(/,.*$/, "", line)               # take first CIDR if comma-list
+        sub(/\/[0-9]+.*$/, "", line)        # strip the /NN prefix
+        sub(/[[:space:]]+$/, "", line)
+        if (pub != "" && line != "") {
+            printf "%s\t%s\t%s\n", name, pub, line
         }
+        name = ""; pub = ""
+        next
+    }
+    # Any other directive (PrivateKey, Address, ListenPort, Jc, ...) outside
+    # an active peer block resets any pending name.
+    /^[A-Za-z]/ {
+        if (pub == "") name = ""
     }
 ' "$SERVER_CONF")
 
-# Live state from `awg show awg0 dump`. Format is one TSV line per peer:
-#   <pubkey> <psk> <endpoint> <allowed-ips> <last-handshake> <rx-bytes> <tx-bytes> <keepalive>
-# The first line is the interface itself; skip it.
 human_bytes() {
     awk -v b="$1" 'BEGIN {
-        if (b < 1024)      printf "%d B",   b
-        else if (b < 1048576)  printf "%.1f KiB", b/1024
+        if (b < 1024)            printf "%d B",   b
+        else if (b < 1048576)    printf "%.1f KiB", b/1024
         else if (b < 1073741824) printf "%.1f MiB", b/1048576
-        else printf "%.2f GiB", b/1073741824
+        else                     printf "%.2f GiB", b/1073741824
     }'
 }
+
 human_age() {
     local ts="$1"
-    if [ "$ts" = "0" ]; then echo "never"; return; fi
+    if [ "$ts" = "0" ] || [ -z "$ts" ]; then echo "never"; return; fi
     local now diff
     now=$(date +%s)
     diff=$(( now - ts ))
@@ -62,12 +96,15 @@ human_age() {
     fi
 }
 
-# Header.
 printf '%-20s  %-12s  %-14s  %-12s  %s\n' \
     "NAME" "IP" "PUBKEY (last)" "HANDSHAKE" "RX / TX"
 
-# Body. Tail -n +2 skips the interface line.
-docker exec awg awg show awg0 dump 2>/dev/null | tail -n +2 | \
+# Live state from `awg show awg0 dump`. Format per peer (one line, TSV):
+#   <pubkey>  <psk>  <endpoint>  <allowed-ips>  <latest-handshake>  <rx>  <tx>  <keepalive>
+# Line 1 is the interface itself (different shape); skip it.
+#
+# Process-substitution feed so the loop runs in the parent shell and can
+# read NAME_BY_KEY / IP_BY_KEY directly.
 while IFS=$'\t' read -r pub _psk _endpoint _allowed handshake rx tx _ka; do
     [ -n "$pub" ] || continue
     name="${NAME_BY_KEY[$pub]:-(unnamed)}"
@@ -77,4 +114,4 @@ while IFS=$'\t' read -r pub _psk _endpoint _allowed handshake rx tx _ka; do
         "$name" "$ip" "$key_tail" \
         "$(human_age "$handshake")" \
         "$(human_bytes "$rx")" "$(human_bytes "$tx")"
-done
+done < <(docker exec awg awg show awg0 dump 2>/dev/null | tail -n +2)
