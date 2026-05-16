@@ -96,8 +96,21 @@ human_age() {
     fi
 }
 
-printf '%-20s  %-12s  %-14s  %-12s  %s\n' \
-    "NAME" "IP" "PUBKEY (last)" "HANDSHAKE" "RX / TX"
+# WireGuard has no explicit "connected" state. We infer one from the last
+# handshake age. Threshold = 180s (REJECT_AFTER_TIME) — the protocol's own
+# cutoff for considering a session dead. With PersistentKeepalive = 25,
+# a live peer renews every ~25s, so anything beyond 3 min is reliably gone.
+peer_status() {
+    local ts="$1"
+    if [ "$ts" = "0" ] || [ -z "$ts" ]; then echo "—"; return; fi
+    local now diff
+    now=$(date +%s)
+    diff=$(( now - ts ))
+    if [ "$diff" -le 180 ]; then echo "online"; else echo "offline"; fi
+}
+
+printf '%-20s  %-8s  %-12s  %-14s  %-12s  %s\n' \
+    "NAME" "STATUS" "IP" "PUBKEY (last)" "HANDSHAKE" "RX / TX"
 
 # Live state from `awg show awg0 dump`. Format per peer (one line, TSV):
 #   <pubkey>  <psk>  <endpoint>  <allowed-ips>  <latest-handshake>  <rx>  <tx>  <keepalive>
