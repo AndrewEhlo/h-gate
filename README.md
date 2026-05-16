@@ -187,23 +187,29 @@ docker compose ps     # all three containers should be "running"
 
 Open the wg-easy UI at `http://<WG_HOST>:51821` and log in.
 
-## Adding clients
+## Managing clients
 
 ### wg-easy (WireGuard)
 
-Use the web UI. **New Client** → name it → download `.conf` or scan QR. Routing is governed by `WG_ALLOWED_IPS` in `.env`.
+Use the web UI. **New Client** → name it → download `.conf` or scan QR. Routing is governed by `WG_ALLOWED_IPS` in `.env`. Delete from the UI when you're done with a client. There is no script for wg-easy — the web UI is the source of truth.
 
 ### XRAY (VLESS + Reality)
 
 ```bash
-sudo bash scripts/xray-add-user.sh <client-name>
+bash scripts/xray-add-user.sh    <client-name>     # add
+bash scripts/xray-list-users.sh                    # list
+bash scripts/xray-remove-user.sh <client-name>     # remove
 ```
 
-The script generates a fresh UUID, appends a client entry to `xray/config.json`, restarts the xray container, derives the Reality public key from the private key in `xray/config.json`, and writes the resulting `vless://...` URL to `xray/urls/<client-name>.txt` (mode 600). The URL is also printed to stdout — copy it into the client app, or render an in-terminal QR with:
+**Add** generates a fresh UUID, appends a client entry to `xray/config.json`, restarts the xray container, derives the Reality public key on the fly from the private key, and writes the resulting `vless://...` URL to `xray/urls/<client-name>.txt` (mode 600). The URL is also printed to stdout — copy into the client app, or render an in-terminal QR:
 
 ```bash
-sudo qrencode -t ansiutf8 < xray/urls/<client-name>.txt
+qrencode -t ansiutf8 < xray/urls/<client-name>.txt
 ```
+
+**List** prints a table of all configured clients (`NAME`, `UUID`, `URL FILE`) by reading `xray/config.json`. XRAY doesn't expose per-client live state unless its `statsService` is enabled, so there's no traffic counter here.
+
+**Remove** deletes the matching client entry (by `email` field) from `xray/config.json`, deletes the URL file, and restarts the xray container. Refuses with an error if the name isn't found.
 
 Client apps:
 
@@ -216,20 +222,26 @@ Client apps:
 ### AmneziaWG
 
 ```bash
-sudo bash scripts/awg-add-user.sh <client-name>
+bash scripts/awg-add-user.sh    <client-name>     # add
+bash scripts/awg-list-users.sh                    # list (with live state)
+bash scripts/awg-remove-user.sh <client-name>     # remove
 ```
 
-The script generates a fresh keypair via the running `awg` container, picks the next free `10.9.0.X` address (scans existing `[Peer] AllowedIPs` in `awg-data/awg0.conf`), appends a new `[Peer]` block, restarts the container, and emits a single-line `vpn://...` URL on stdout. The URL is also written to `awg-data/urls/<client-name>.txt` (mode 600).
+**Add** generates a fresh keypair via the running `awg` container, picks the next free `10.9.0.X` address (scanning existing `[Peer] AllowedIPs`), appends a new `[Peer]` block, restarts the container, and emits a single-line `vpn://...` URL. Also written to `awg-data/urls/<client-name>.txt` (mode 600). `Jc`/`Jmin`/`Jmax`/`S1`-`S4`/`H1`-`H4` are read from the server config and embedded in the URL — server and client always agree.
 
-`Jc`/`Jmin`/`Jmax`/`S1`/`S2`/`H1`-`H4` are read from the server config and embedded in the client URL, so they always match — no manual sync needed.
+**List** shows each peer with its `NAME`, `IP`, last 10 characters of the `PUBKEY`, `HANDSHAKE` age, and cumulative `RX / TX`. State comes from `awg show awg0 dump` inside the container, joined against names in `awg-data/awg0.conf`. Peers without a `# <name>` comment line (e.g. manually added) appear as `(unnamed)`.
 
-Client app (all platforms): **AmneziaVPN** — paste the `vpn://` URL into "Add server" → "Paste from clipboard". Or pipe the URL file through `qrencode` and scan with the mobile app:
+**Remove** deletes the matching `[Peer]` block (and its leading `# <name>` comment line) from `awg-data/awg0.conf`, deletes the URL file, and restarts the container. Refuses with an error if the named peer isn't found. Peers without a `# <name>` comment must be edited out by hand.
+
+Client app (all platforms): **AmneziaVPN** — paste the `vpn://` URL into "Add server" → "Paste from clipboard", or scan a QR:
 
 ```bash
-sudo qrencode -t ansiutf8 < awg-data/urls/<client-name>.txt
+qrencode -t ansiutf8 < awg-data/urls/<client-name>.txt
 ```
 
-> **Note:** the `vpn://` format is the AmneziaVPN apps' native share format (Qt `qCompress` + base64url over a JSON payload nesting the full `.conf` as `last_config`). If a future AmneziaVPN release changes the schema and rejects the URL, fall back to manual peer registration (key generation + `[Peer]` block in `awg-data/awg0.conf` + client `.conf` mirroring the server's obfuscation params).
+> **Schema caveat for the `vpn://` URL**: AmneziaVPN's share format isn't publicly specced. The script generates URLs in the v2 schema (`container: "amnezia-awg2"`, `protocol_version: "2"`, `last_config` as a JSON-stringified object containing `client_priv_key`, `clientId`, `mtu`, etc.). If a future AmneziaVPN release changes the schema and rejects the URL, fall back to manual peer registration: copy the `[Peer]` block from `awg-data/awg0.conf` plus the obfuscation params from `[Interface]` into a hand-written client `.conf`.
+>
+> **Server-side `I1-I5`**: the `amneziawg-tools` we build doesn't yet recognize the optional `I1-I5` spoof-packet keys; `awg setconf` errors with `Line unrecognized`. They're omitted from `awg-data/awg0.conf` and emitted as empty strings in the client URL. AmneziaVPN still classifies the import as full AmneziaWG v2.
 
 ## Full Tunnel vs Split Tunnel (wg-easy)
 
@@ -248,17 +260,144 @@ docker compose down && docker compose up -d
 
 This sets the default for *new* clients. Existing clients keep their downloaded config. For XRAY and AmneziaWG, `AllowedIPs` is set in the client config and changed there directly.
 
+## Monitoring & diagnostics
+
+### Who's connected right now
+
+**wg-easy (WireGuard)** — peer state with last-handshake and per-peer transfer:
+
+```bash
+docker exec wg-easy wg show
+```
+
+The web UI at `http://<WG_HOST>:51821` shows the same data graphically.
+
+**AmneziaWG** — the list script joins names from `awg-data/awg0.conf` with live state from `awg show`:
+
+```bash
+bash scripts/awg-list-users.sh
+docker exec awg awg show           # raw output, if you need it
+```
+
+A peer with `latest handshake: never` has been registered but hasn't dialed yet. Recent handshake + non-zero transfer = currently connected.
+
+**XRAY** — configured clients (no per-client live counters without `statsService`):
+
+```bash
+bash scripts/xray-list-users.sh
+```
+
+For live connection events:
+
+```bash
+docker compose logs --tail=100 xray
+```
+
+XRAY logs an `accepted` line per established session. With `loglevel: "warning"` (our default), routine connect lines aren't emitted; bump to `info` in `xray/config.json` temporarily if you need them.
+
+**SSH on the host**:
+
+```bash
+who                    # currently logged in
+last -n 20             # recent login history
+```
+
+### Traffic volumes
+
+Per-peer cumulative bytes are already in `wg show` / `awg show` output (`transfer: X received, Y sent`).
+
+Aggregate per-container:
+
+```bash
+docker stats --no-stream
+```
+
+Host interface counters (cumulative since boot — useful for "how much have we shifted overall"):
+
+```bash
+ip -s link
+```
+
+### Failed connection attempts
+
+**SSH brute force** — most active source IPs in the last hour:
+
+```bash
+sudo journalctl -u ssh.service --since "1 hour ago" \
+    | grep -oE 'from [0-9.]+' | sort | uniq -c | sort -rn | head -10
+```
+
+What fail2ban has caught:
+
+```bash
+sudo fail2ban-client status sshd
+```
+
+Shows `Currently failed`, `Total failed`, `Currently banned`, plus the banned IP list. If `Currently banned` is non-zero, those IPs are firewalled off until the bantime expires.
+
+**XRAY rejections** — clients with the wrong UUID, mis-typed SNI, etc.:
+
+```bash
+docker compose logs --tail=300 xray | grep -iE 'rejected|invalid|denied|fail'
+```
+
+**AmneziaWG handshake misses** — the server *silently* drops on obfuscation/key mismatch, so failures don't show in logs. Two ways to spot:
+
+- `awg show` peer has `transfer: N received, 0 sent` (packets arriving, server can't decrypt)
+- tcpdump shows inbound packets but no outbound responses from `:51822`:
+  ```bash
+  sudo tcpdump -i any -nn udp port 51822 -c 30
+  ```
+
+If the client keeps trying every ~5s with bursts of 5 packets (Jc=4 junks + 1 real handshake) but no response leaves the server, you've got a param mismatch.
+
+### Security events
+
+**ufw blocks** — packets dropped by an explicit deny rule (only present if `ufw logging` is on; we enabled it during hardening):
+
+```bash
+sudo journalctl -k --since "1 hour ago" | grep '\[UFW BLOCK\]'
+```
+
+**Log-martians** — packets with impossible source addresses (we enabled `net.ipv4.conf.all.log_martians=1`). Nothing in normal operation; entries here indicate spoofing or a misconfigured peer:
+
+```bash
+sudo dmesg --time-format=iso | grep -i martian | tail
+```
+
+**Recently banned IPs**:
+
+```bash
+sudo fail2ban-client banned
+```
+
+### Container & host health
+
+```bash
+docker compose ps                       # all three should say "Up"
+docker compose logs --tail=30 <svc>     # recent log lines for one service
+docker stats --no-stream                # CPU / mem / network per container
+```
+
+Host basics:
+
+```bash
+uptime                                  # load + uptime
+free -h                                 # memory
+df -h /                                 # root disk
+sudo journalctl -p err --since "24 hours ago" | head -30   # recent errors
+```
+
+**Unattended-upgrades** sanity (set up in `HARDENING.md`):
+
+```bash
+systemctl is-active unattended-upgrades apt-daily.timer apt-daily-upgrade.timer
+tail -20 /var/log/unattended-upgrades/unattended-upgrades.log
+```
+
 ## Management
 
 ```bash
-# View logs (all services or one)
-docker compose logs -f
-docker compose logs -f xray
-
-# Live peer state
-docker exec wg-easy wg show
-docker exec awg awg show
-
 # Stop everything
 docker compose down
 
@@ -269,7 +408,7 @@ docker compose pull && docker compose up -d
 docker compose build --no-cache awg && docker compose up -d awg
 ```
 
-See **Backup & Restore** below for snapshot and recovery.
+See **Backup & Restore** below for snapshot and recovery, and **Monitoring & diagnostics** above for day-to-day visibility.
 
 ## Backup & Restore
 
