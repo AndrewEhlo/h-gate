@@ -78,14 +78,26 @@ PRIV="$(iface_get PrivateKey)"
 JC="$(iface_get Jc)"
 JMIN="$(iface_get Jmin)"
 JMAX="$(iface_get Jmax)"
-S1="$(iface_get S1)";  S1="${S1:-0}"
-S2="$(iface_get S2)";  S2="${S2:-0}"
+S1="$(iface_get S1)"; S1="${S1:-0}"
+S2="$(iface_get S2)"; S2="${S2:-0}"
+S3="$(iface_get S3)"; S3="${S3:-0}"
+S4="$(iface_get S4)"; S4="${S4:-0}"
 H1="$(iface_get H1)"
 H2="$(iface_get H2)"
 H3="$(iface_get H3)"
 H4="$(iface_get H4)"
+I1="$(iface_get I1)"
+I2="$(iface_get I2)"
+I3="$(iface_get I3)"
+I4="$(iface_get I4)"
+I5="$(iface_get I5)"
 LISTEN_PORT="$(iface_get ListenPort)"
 LISTEN_PORT="${LISTEN_PORT:-${AWG_PORT:-51822}}"
+
+# Compute the /24 network address for subnet_address (AmneziaVPN v2 field).
+# Server Address is e.g. "10.9.0.1/24"; we want "10.9.0.0".
+SERVER_ADDR="$(iface_get Address)"
+SUBNET_ADDRESS="$(echo "$SERVER_ADDR" | awk -F'[./]' '{ printf "%s.%s.%s.0", $1, $2, $3 }')"
 
 missing=()
 for v in JC JMIN JMAX H1 H2 H3 H4; do
@@ -94,6 +106,7 @@ for v in JC JMIN JMAX H1 H2 H3 H4; do
 done
 if [ "${#missing[@]}" -gt 0 ]; then
     echo "error: missing in $SERVER_CONF [Interface]: ${missing[*]}" >&2
+    echo "       this script expects AWG v2 format (H1-H4 as ranges, S1-S4 present)" >&2
     exit 1
 fi
 
@@ -140,71 +153,95 @@ CLIENT_PUB="$(printf '%s' "$CLIENT_PRIV" | docker exec -i awg awg pubkey | tr -d
 
 ( cd "$REPO_ROOT" && docker compose restart awg ) >&2
 
-# Build the standard WireGuard .conf body. This is what AmneziaVPN nests
-# inside the vpn:// payload as "last_config" — it's also what you'd paste
-# directly if the URL format ever stops working.
+# Build the WireGuard .conf body with AWG v2 obfuscation params.
+# This is what AmneziaVPN nests inside the vpn:// payload as "last_config",
+# and what amneziawg-quick reads as the actual interface config on import.
 CONF_TEXT="$(cat <<EOF
 [Interface]
-PrivateKey = $CLIENT_PRIV
 Address = $NEXT_IP/32
 DNS = 1.1.1.1
-
+PrivateKey = $CLIENT_PRIV
 Jc = $JC
 Jmin = $JMIN
 Jmax = $JMAX
 S1 = $S1
 S2 = $S2
+S3 = $S3
+S4 = $S4
 H1 = $H1
 H2 = $H2
 H3 = $H3
 H4 = $H4
+I1 = $I1
+I2 = $I2
+I3 = $I3
+I4 = $I4
+I5 = $I5
 
 [Peer]
 PublicKey = $SERVER_PUB
-Endpoint = $WG_HOST:$LISTEN_PORT
 AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = $WG_HOST:$LISTEN_PORT
 PersistentKeepalive = 25
 EOF
 )"
 
 # Encode as a vpn:// URL: JSON payload → qCompress (Qt-style: 4-byte BE
-# uncompressed length + zlib stream) → base64url. AmneziaVPN's schema for
-# AWG isn't publicly specced — obfuscation params are lifted out of the
-# .conf and set as explicit fields on the awg object so the app classifies
-# the container as proper AmneziaWG (not "AmneziaWG Legacy" = vanilla WG).
-URL="$(printf '%s' "$CONF_TEXT" | python3 - "$NAME" "$WG_HOST" "$LISTEN_PORT" <<'PY_EOF'
-import sys, json, zlib, base64, struct, re
+# uncompressed length + zlib stream) → base64url.
+#
+# Schema reverse-engineered from a known-good AmneziaVPN export:
+#   container          = "amnezia-awg2" (NOT "amnezia-awg" — that's Legacy)
+#   inner key          = "awg" (NOT matching the container name)
+#   protocol_version   = "2" — required marker for modern AWG
+#   subnet_address     = .0 of the server /24
+#   I1-I5 spoof blobs  = present even if empty
+URL="$(printf '%s' "$CONF_TEXT" \
+    | python3 - "$NAME" "$WG_HOST" "$LISTEN_PORT" "$SUBNET_ADDRESS" \
+        "$JC" "$JMIN" "$JMAX" "$S1" "$S2" "$S3" "$S4" \
+        "$H1" "$H2" "$H3" "$H4" \
+        "$I1" "$I2" "$I3" "$I4" "$I5" <<'PY_EOF'
+import sys, json, zlib, base64, struct
 
-name, host, port = sys.argv[1:4]
+(name, host, port, subnet,
+ jc, jmin, jmax, s1, s2, s3, s4,
+ h1, h2, h3, h4,
+ i1, i2, i3, i4, i5) = sys.argv[1:21]
 conf = sys.stdin.read()
 
-def grab(key):
-    m = re.search(rf'^{key}\s*=\s*(\S+)', conf, re.MULTILINE)
-    return m.group(1) if m else None
-
 awg = {
-    "last_config":           conf,
-    "transport_proto":       "udp",
-    "port":                  str(port),
-    "isObfuscationEnabled":  True,
+    "H1":               h1,
+    "H2":               h2,
+    "H3":               h3,
+    "H4":               h4,
+    "I1":               i1,
+    "I2":               i2,
+    "I3":               i3,
+    "I4":               i4,
+    "I5":               i5,
+    "Jc":               jc,
+    "Jmax":             jmax,
+    "Jmin":             jmin,
+    "S1":               s1,
+    "S2":               s2,
+    "S3":               s3,
+    "S4":               s4,
+    "last_config":      conf,
+    "port":             str(port),
+    "protocol_version": "2",
+    "subnet_address":   subnet,
+    "transport_proto":  "udp",
 }
-for k in ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"):
-    v = grab(k)
-    if v is not None:
-        awg[k] = v
 
 payload = {
+    "containers": [{
+        "awg":       awg,
+        "container": "amnezia-awg2",
+    }],
+    "defaultContainer": "amnezia-awg2",
     "description":      name,
-    "hostName":         host,
     "dns1":             "1.1.1.1",
     "dns2":             "1.0.0.1",
-    "defaultContainer": "amnezia-awg",
-    "containers": [{
-        "container":   "amnezia-awg",
-        # Inner key matches the container name. Using "awg" here caused
-        # AmneziaVPN to import as "AmneziaWG Legacy" (no obfuscation).
-        "amnezia-awg": awg,
-    }],
+    "hostName":         host,
 }
 
 data        = json.dumps(payload, separators=(',', ':')).encode('utf-8')
