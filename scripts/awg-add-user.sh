@@ -186,27 +186,63 @@ PersistentKeepalive = 25
 EOF
 )"
 
-# Encode as a vpn:// URL: JSON payload → qCompress (Qt-style: 4-byte BE
-# uncompressed length + zlib stream) → base64url.
-#
-# Schema reverse-engineered from a known-good AmneziaVPN export:
-#   container          = "amnezia-awg2" (NOT "amnezia-awg" — that's Legacy)
-#   inner key          = "awg" (NOT matching the container name)
-#   protocol_version   = "2" — required marker for modern AWG
-#   subnet_address     = .0 of the server /24
-#   I1-I5 spoof blobs  = present even if empty
-URL="$(printf '%s' "$CONF_TEXT" \
-    | python3 - "$NAME" "$WG_HOST" "$LISTEN_PORT" "$SUBNET_ADDRESS" \
+# Encode as a vpn:// URL. Schema reverse-engineered from a known-good
+# AmneziaVPN export:
+#   container        = "amnezia-awg2"
+#   inner key        = "awg"
+#   protocol_version = "2"
+#   last_config      = JSON-stringified object containing client_priv_key,
+#                      client_ip, mtu, clientId, the raw .conf as "config",
+#                      and all H/S/I/J params duplicated.
+#                      AmneziaVPN reads connection params from THIS nested
+#                      object, not from the outer awg fields. Without it
+#                      the import succeeds but no interface comes up.
+URL="$(python3 - "$NAME" "$WG_HOST" "$LISTEN_PORT" "$SUBNET_ADDRESS" \
         "$JC" "$JMIN" "$JMAX" "$S1" "$S2" "$S3" "$S4" \
         "$H1" "$H2" "$H3" "$H4" \
-        "$I1" "$I2" "$I3" "$I4" "$I5" <<'PY_EOF'
-import sys, json, zlib, base64, struct
+        "$I1" "$I2" "$I3" "$I4" "$I5" \
+        "$CLIENT_PRIV" "$CLIENT_PUB" "$SERVER_PUB" "$NEXT_IP" \
+        "$CONF_TEXT" <<'PY_EOF'
+import sys, json, zlib, base64, struct, uuid
 
 (name, host, port, subnet,
  jc, jmin, jmax, s1, s2, s3, s4,
  h1, h2, h3, h4,
- i1, i2, i3, i4, i5) = sys.argv[1:21]
-conf = sys.stdin.read()
+ i1, i2, i3, i4, i5,
+ client_priv, client_pub, server_pub, client_ip,
+ conf_text) = sys.argv[1:26]
+
+# last_config: the inner JSON object AmneziaVPN actually uses for v2 imports.
+inner = {
+    "H1":                   h1,
+    "H2":                   h2,
+    "H3":                   h3,
+    "H4":                   h4,
+    "I1":                   i1,
+    "I2":                   i2,
+    "I3":                   i3,
+    "I4":                   i4,
+    "I5":                   i5,
+    "Jc":                   jc,
+    "Jmax":                 jmax,
+    "Jmin":                 jmin,
+    "S1":                   s1,
+    "S2":                   s2,
+    "S3":                   s3,
+    "S4":                   s4,
+    "allowed_ips":          ["0.0.0.0/0", "::/0"],
+    "clientId":             str(uuid.uuid4()),
+    "client_ip":            client_ip,
+    "client_priv_key":      client_priv,
+    "client_pub_key":       client_pub,
+    "config":               conf_text,
+    "hostName":             host,
+    "mtu":                  "1376",
+    "persistent_keep_alive": "25",
+    "port":                 int(port),
+    "psk_key":              "",
+    "server_pub_key":       server_pub,
+}
 
 awg = {
     "H1":               h1,
@@ -225,7 +261,7 @@ awg = {
     "S2":               s2,
     "S3":               s3,
     "S4":               s4,
-    "last_config":      conf,
+    "last_config":      json.dumps(inner, indent=4) + "\n",
     "port":             str(port),
     "protocol_version": "2",
     "subnet_address":   subnet,
