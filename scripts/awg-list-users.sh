@@ -123,8 +123,10 @@ while IFS=$'\t' read -r pub _psk _endpoint _allowed handshake rx tx _ka; do
     name="${NAME_BY_KEY[$pub]:-(unnamed)}"
     ip="${IP_BY_KEY[$pub]:-?}"
     key_tail="…${pub: -10}"
-    printf '%-20s  %-12s  %-14s  %-12s  %s / %s\n' \
-        "$name" "$ip" "$key_tail" \
+    printf '%-20s  %-8s  %-12s  %-14s  %-12s  %s / %s\n' \
+        "$name" \
+        "$(peer_status "$handshake")" \
+        "$ip" "$key_tail" \
         "$(human_age "$handshake")" \
         "$(human_bytes "$rx")" "$(human_bytes "$tx")"
 done < <(docker exec awg awg show awg0 dump 2>/dev/null | tail -n +2)
