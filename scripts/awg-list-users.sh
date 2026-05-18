@@ -63,8 +63,8 @@ done < <(awk '
         sub(/[[:space:]]+$/, "", line)
         if (pub != "" && line != "") {
             # Emit a literal "(unnamed)" placeholder when no name was captured.
-            # If we wrote an empty first field here, `read -r ... ` would strip
-            # the leading TAB (it's whitespace under POSIX rules) and shift
+            # An empty first field here would let `read -r ... ` strip the
+            # leading TAB (TAB is whitespace under POSIX rules) and shift
             # the values left, losing the IP.
             printf "%s\t%s\t%s\n", (name == "" ? "(unnamed)" : name), pub, line
         }
