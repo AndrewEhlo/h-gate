@@ -227,6 +227,7 @@ Client apps:
 sudo bash scripts/awg-add-user.sh    <client-name>     # add
 sudo bash scripts/awg-list-users.sh                    # list (with live state)
 sudo bash scripts/awg-remove-user.sh <client-name>     # remove
+sudo bash scripts/awg-show-conf.sh   <client-name>     # decode saved URL → raw .conf
 ```
 
 **Add** generates a fresh keypair via the running `awg` container, picks the next free `10.9.0.X` address (scanning existing `[Peer] AllowedIPs`), appends a new `[Peer]` block, restarts the container, and emits a single-line `vpn://...` URL. Also written to `awg-data/urls/<client-name>.txt` (mode 600). `Jc`/`Jmin`/`Jmax`/`S1`-`S4`/`H1`-`H4` are read from the server config and embedded in the URL — server and client always agree.
@@ -234,6 +235,13 @@ sudo bash scripts/awg-remove-user.sh <client-name>     # remove
 **List** shows each peer with its `NAME`, `IP`, last 10 characters of the `PUBKEY`, `HANDSHAKE` age, and cumulative `RX / TX`. State comes from `awg show awg0 dump` inside the container, joined against names in `awg-data/awg0.conf`. Peers without a `# <name>` comment line (e.g. manually added) appear as `(unnamed)`.
 
 **Remove** deletes the matching `[Peer]` block (and its leading `# <name>` comment line) from `awg-data/awg0.conf`, deletes the URL file, and restarts the container. Refuses with an error if the named peer isn't found. Peers without a `# <name>` comment must be edited out by hand.
+
+**Show-conf** decodes the saved `vpn://` URL and prints the embedded WireGuard `.conf` to stdout — useful when the AmneziaVPN app rejects the URL form, or when a client needs a vanilla `.conf` for a different tool. The `.conf` contains the client's `PrivateKey`, so the output is sensitive. Redirect or pipe carefully:
+
+```bash
+sudo bash scripts/awg-show-conf.sh alice > alice.conf
+sudo bash scripts/awg-show-conf.sh alice | qrencode -t ansiutf8
+```
 
 Client app (all platforms): **AmneziaVPN** — paste the `vpn://` URL into "Add server" → "Paste from clipboard", or scan a QR:
 
